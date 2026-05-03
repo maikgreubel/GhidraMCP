@@ -341,6 +341,19 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, listDefinedStrings(offset, limit, filter));
         });
 
+        server.createContext("/search_strings", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String pattern = qparams.get("pattern");
+            sendResponse(exchange, searchDefinedStrings(pattern));
+        });
+
+        server.createContext("/disassemble_range", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String startAddress = qparams.get("start_address");
+            String endAddress = qparams.get("end_address");
+            sendResponse(exchange, disassembleRange(startAddress, endAddress));
+        });
+
         // BSim endpoints
         server.createContext("/bsim/select_database", exchange -> {
             Map<String, String> params = parsePostParams(exchange);
@@ -886,7 +899,23 @@ public class GhidraMCPPlugin extends Plugin {
         } catch (Exception e) {
             return "Error disassembling function: " + e.getMessage();
         }
-    }    
+    }  
+    
+    private String disassembleRange(String startAddressStr, String endAddressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (startAddressStr == null || startAddressStr.isEmpty() || endAddressStr == null || endAddressStr.isEmpty()) {
+            return "Start and end addresses are required";
+        }
+
+        try {
+            Address startAddr = program.getAddressFactory().getAddress(startAddressStr);
+            Address endAddr = program.getAddressFactory().getAddress(endAddressStr);
+            return disassembleRangeInProgram(startAddr, endAddr, program);
+        } catch (Exception e) {
+            return "Error disassembling range: " + e.getMessage();
+        }
+    }
 
     /**
      * Set a comment using the specified comment type (PRE_COMMENT or EOL_COMMENT)
@@ -1409,6 +1438,30 @@ public class GhidraMCPPlugin extends Plugin {
         }
         
         return paginateList(lines, offset, limit);
+    }
+
+    private String searchDefinedStrings(String pattern) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (pattern == null || pattern.isEmpty()) return "Search pattern is required";
+
+        List<String> lines = new ArrayList<>();
+        DataIterator dataIt = program.getListing().getDefinedData(true);
+        
+        while (dataIt.hasNext()) {
+            Data data = dataIt.next();
+            
+            if (data != null && isStringData(data)) {
+                String value = data.getValue() != null ? data.getValue().toString() : "";
+                
+                if (value.toLowerCase().contains(pattern.toLowerCase())) {
+                    String escapedValue = escapeString(value);
+                    lines.add(String.format("%s: \"%s\"", data.getAddress(), escapedValue));
+                }
+            }
+        }
+        
+        return paginateList(lines, 0, Integer.MAX_VALUE);                
     }
 
     /**
@@ -2174,6 +2227,33 @@ public class GhidraMCPPlugin extends Plugin {
         }
         return null;
     }
+
+    private String disassembleRangeInProgram(Address start, Address end, Program program) {
+        try {
+            StringBuilder result = new StringBuilder();
+            Listing listing = program.getListing();
+
+            InstructionIterator instructions = listing.getInstructions(start, true);
+            while (instructions.hasNext()) {
+                Instruction instr = instructions.next();
+                if (instr.getAddress().compareTo(end) > 0) {
+                    break;
+                }
+                String comment = listing.getComment(CommentType.EOL, instr.getAddress());
+                comment = (comment != null) ? "; " + comment : "";
+
+                result.append(String.format("%s: %s %s\n", 
+                    instr.getAddress(), 
+                    instr.toString(),
+                    comment));
+            }
+            return result.toString();
+        } catch (Exception e) {
+            Msg.error(this, "Error disassembling range in external program", e);
+        }
+        return null;
+    }
+
 
     /**
      * Filter BSim results by maximum similarity and confidence thresholds, and limit matches.
